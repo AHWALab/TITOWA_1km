@@ -20,8 +20,9 @@ from shutil import rmtree, copy
 import os
 from os import makedirs, listdir, rename, remove
 import glob
-from datetime import datetime as dt
+from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
 import numpy as np
 import re
 import subprocess
@@ -95,9 +96,9 @@ def main(args):
     # Real-time mode or Hindcast mode
     # Figure out the timing for running the current timestep
     if HindCastMode == True:
-        currentTime = dt.strptime(HindCastDate, "%Y-%m-%d %H:%M")
+        currentTime = datetime.strptime(HindCastDate, "%Y-%m-%d %H:%M")
     else:
-        currentTime = dt.datetime.now(dt.timezone.utc)
+        currentTime = datetime.now(timezone.utc)
     
     # Round down the current minutess to the nearest 30min increment in the past (for 30 forecast)
     if systemTimestep == 30:
@@ -124,8 +125,8 @@ def main(args):
     # Only check for states as far as we have QPs (6 hours)
     failTime = currentTime - timedelta(hours=6)
     
-    systemStartLRTime = dt.strptime(config_file.StartLRtime,"%Y-%m-%d %H:%M")
-    EndLRTime = dt.strptime(config_file.EndLRTime,"%Y-%m-%d %H:%M")
+    systemStartLRTime = datetime.strptime(config_file.StartLRtime,"%Y-%m-%d %H:%M")
+    EndLRTime = datetime.strptime(config_file.EndLRTime,"%Y-%m-%d %H:%M")
     
     if HindCastMode and LR_run:
         systemEndTime = EndLRTime + timedelta(hours=4) #4 hours dry
