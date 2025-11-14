@@ -115,7 +115,7 @@ def send_state_alerts(foundAllStates,realSystemStartTime,systemStartTime,current
             text=message
         )
 
-def write_control_file(tmpOutput, dataPath, subdomain, systemModel,templatePath, template, statesPath, realSystemStartTime, systemStartLRTime, systemWarmEndTime, systemStateEndTime, systemEndTime, LR_TimeStep, LR_run):
+def write_control_file(tmpOutput, dataPath, subdomain, systemModel,templatePath, template, statesPath, realSystemStartTime, systemStartLRTime, systemWarmEndTime, systemStateEndTime, systemEndTime, LR_TimeStep, LR_run, statesFound):
     # Clean up "Hot" folders
     # Delete the previously existing "Hot" folders, ignore error if it doesn't exist
     rmtree(tmpOutput, ignore_errors=1)
@@ -148,6 +148,11 @@ def write_control_file(tmpOutput, dataPath, subdomain, systemModel,templatePath,
                 line = "task=Simulation_QPF\n"    # uncomment QPF
             else:
                 line = "#task=Simulation_QPF\n"   # comment QPF
+
+        # If valid states are found, do not specify warm-up in control file
+        if statesFound and "TIME_WARMEND=" in line:
+            if not line.lstrip().startswith('#'):
+                line = "#" + line
         fOut.write(line)
         
     fOut.close()
@@ -165,13 +170,56 @@ def run_EF5(ef5Path, hot_folder_path, control_file, log_file):
     subprocess.call(ef5Path + " " + control_file + " > " + hot_folder_path + log_file, shell=True)
 
 
-def run_ef5_simulation(ef5Path, tmpOutput, controlFile):
-    args = [ef5Path, tmpOutput, controlFile, "ef5.log"]
+def _rename_outputs_with_timestamp(hot_folder_path: str, timestamp_str: str) -> None:
+    """Rename EF5 outputs in the hot folder to use a unified timestamp.
+
+    - maxq.*, maxunitq.*, qpeaccum.*, qpfaccum.* -> base.{timestamp}.tif
+    - ts.*.csv -> ts.*.{timestamp}.csv
+    Log file naming is handled via the EF5 invocation (redirect target).
+    """
+    bases = ["maxq", "maxunitq", "qpeaccum", "qpfaccum", "maxsm"]
+    for base in bases:
+        pattern = os.path.join(hot_folder_path, f"{base}.*.tif")
+        matches = sorted(glob.glob(pattern))
+        if not matches:
+            continue
+        # Prefer the newest file in case multiple exist
+        latest = max(matches, key=lambda p: os.path.getmtime(p))
+        new_name = os.path.join(hot_folder_path, f"{base}.{timestamp_str}.tif")
+        try:
+            if os.path.abspath(latest) != os.path.abspath(new_name):
+                if os.path.exists(new_name):
+                    os.remove(new_name)
+                os.rename(latest, new_name)
+        except Exception as e:
+            print(f"Warning: could not rename {latest} -> {new_name}: {e}")
+
+    # Timeseries CSVs
+    for csv_path in glob.glob(os.path.join(hot_folder_path, "ts.*.csv")):
+        root, ext = os.path.splitext(csv_path)
+        new_name = f"{root}.{timestamp_str}{ext}"
+        try:
+            if os.path.abspath(csv_path) != os.path.abspath(new_name):
+                if os.path.exists(new_name):
+                    os.remove(new_name)
+                os.rename(csv_path, new_name)
+        except Exception as e:
+            print(f"Warning: could not rename {csv_path} -> {new_name}: {e}")
+
+
+def run_ef5_simulation(ef5Path, tmpOutput, controlFile, output_timestamp_str):
+    # Use timestamped log name
+    log_name = f"ef5.{output_timestamp_str}.log"
+    args = [ef5Path, tmpOutput, controlFile, log_name]
     tp = ThreadPool(1)
     tp.apply_async(run_EF5, args)
     tp.close()
     tp.join()
-    #cleaning EF5 precipitation for next cycle
+
+    # Rename generated outputs to use the requested timestamp
+    _rename_outputs_with_timestamp(tmpOutput, output_timestamp_str)
+
+    # cleaning EF5 precipitation for next cycle
     for f in glob.glob("precipEF5/*"):
         os.remove(f)
 
@@ -200,7 +248,7 @@ def prepare_ef5(precipEF5Folder, precipFolder, statesPath, modelStates,
 
     controlFile = write_control_file(tmpOutput, dataPath, subdomain, systemModel, 
     templatePath, template, statesPath, realSystemStartTime, systemStartLRTime, 
-    systemWarmEndTime, systemStateEndTime, systemEndTime, LR_TimeStep, LR_run)
+    systemWarmEndTime, systemStateEndTime, systemEndTime, LR_TimeStep, LR_run, foundAllStates)
 
     """
     # If data assimilation if being used for CREST, clean up previous data assimilation logs

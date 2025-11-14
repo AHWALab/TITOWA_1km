@@ -36,7 +36,12 @@ def tif2h5py(tif_directory, h5_fname,meta_fname, x1, y1, x2, y2):
         print("The supplied directory ({}) does not exist.".format(tif_directory))
         exit(1)
 
-    files = glob.glob(tif_directory + '/*.' + filename_extension)
+    # Only use observed IMERG QPE GeoTIFFs to build the input time series.
+    # Including QPF files leads to future timestamps in the H5 and misaligned nowcasts.
+    files = [
+        f for f in glob.glob(tif_directory + '/*.' + filename_extension)
+        if 'qpe' in os.path.basename(f)
+    ]
 
     if not files:
         print("No files with extension {} found in {}.".format(
