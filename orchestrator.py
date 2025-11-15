@@ -202,7 +202,9 @@ def main(args):
     
     print("***_________EF5 is ready to be run_________***")
     
-    run_ef5_simulation(ef5Path, tmpOutput, controlFile)
+        # Use orchestrator's currentTime to timestamp outputs/logs
+    output_timestamp_str = currentTime.strftime("%Y%m%d.%H%M%S")
+    run_ef5_simulation(ef5Path, tmpOutput, controlFile, output_timestamp_str)
     newline(2)
     print("******** EF5 Outputs are ready!!! ********")
              

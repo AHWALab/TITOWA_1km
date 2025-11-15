@@ -22,6 +22,7 @@ Notes:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from datetime import datetime, timedelta
 from typing import Iterable, List, Optional, Tuple, Union
@@ -32,12 +33,36 @@ import xarray as xr
 # rioxarray import registers the rio accessor on xarray objects
 import rioxarray  # noqa: F401
 
+# --------------------
+# Optional dependencies
+# --------------------
 try:
     from herbie import Herbie
 except Exception as exc:  # pragma: no cover - provide a clearer import error
     raise ImportError(
         "Herbie is required. Install with `pip install herbie-data`"
     ) from exc
+
+
+# --------------------
+# Auto mode defaults (edit these to customize)
+# --------------------
+# Default output folder for auto mode (when running script without CLI params)
+# Default absolute output directory for auto mode
+AUTO_OUT_DIR = "/home/naman/labWork/cuba/TITOV2Cuba/precip/GFS/GFSData"
+
+# Default auto mode spatial bbox (lon/lat). Edit as needed.
+# Using global by default; set to your region for smaller files.
+AUTO_BBOX = (-180.0, 180.0, -90.0, 90.0)  # (xmin, xmax, ymin, ymax)
+
+# Forecast horizon in hours for auto mode
+AUTO_HOURS = 120  # hourly to +120
+
+# Poll frequency in seconds for auto mode
+AUTO_POLL_SECONDS = 300  # 5 minutes
+
+# Grace period after a new cycle starts before targeting it (minutes)
+AUTO_CYCLE_GRACE_MINUTES = 120
 
 
 def _ensure_datetime(dt_like: Union[str, datetime]) -> datetime:
@@ -212,6 +237,33 @@ def _safe_to_raster(da: xr.DataArray, out_path: str) -> None:
     da_to_write.rio.to_raster(out_path, driver="GTiff", dtype="float32")
 
 
+def _align_to_gfs_cycle(dt: datetime) -> datetime:
+    """Align a datetime to the most recent GFS cycle (00, 06, 12, 18 UTC).
+
+    Returns a naive datetime (tzinfo removed) at the cycle hour at or before dt.
+    """
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    base = dt.replace(minute=0, second=0, microsecond=0)
+    while base.hour % 6 != 0:
+        base -= timedelta(hours=1)
+    return base
+
+
+def _parse_valid_time_from_filename(name: str) -> Optional[datetime]:
+    """Extract valid time from a filename like 'gfs.YYYYMMDDHHMM.tif'."""
+    try:
+        base = os.path.basename(name)
+        if not (base.startswith("gfs.") and base.endswith(".tif")):
+            return None
+        ts = base[len("gfs.") : -len(".tif")]
+        if len(ts) != 12 or not ts.isdigit():
+            return None
+        return datetime.strptime(ts, "%Y%m%d%H%M")
+    except Exception:
+        return None
+
+
 def download_GFS(
     systemStartLRTime: Union[str, datetime],
     systemEndTime: Union[str, datetime],
@@ -220,155 +272,370 @@ def download_GFS(
     ymin: float,
     ymax: float,
     qpf_store_path: str,
+    *,
+    max_cycles_back: int = 4,
+    force_cycle_start: Optional[datetime] = None,
+    allow_previous_cycle_fallback: bool = True,
+    clear_between_attempts: bool = True,
 ) -> List[str]:
     """Download GFS PRATE with Herbie and write hourly rate GeoTIFFs clipped to bbox.
 
+    Implements a built-in retry: if no files are written for the requested window, it will
+    step back by 6 hours to the previous GFS cycle and try again, up to ``max_cycles_back`` times.
+
     Args:
-        systemStartLRTime: GFS run start time (example: "2023-09-04 12").
+        systemStartLRTime: Requested start time of valid outputs (e.g., "2023-09-04 12").
         systemEndTime: Ending valid time for which to produce outputs.
-        xmin: Minimum longitude for clipping.
-        xmax: Maximum longitude for clipping.
-        ymin: Minimum latitude for clipping.
-        ymax: Maximum latitude for clipping.
+        xmin/xmax/ymin/ymax: Bounding box in lon/lat for clipping.
         qpf_store_path: Output directory to store GeoTIFFs.
+        max_cycles_back: How many previous 6-hour GFS cycles to attempt if none written.
 
     Returns:
         List of output GeoTIFF file paths written.
     """
-    init_time = _ensure_datetime(systemStartLRTime)
-    end_time = _ensure_datetime(systemEndTime)
+    # Normalize inputs and ensure naive datetimes (UTC-assumed)
+    init_time_raw = _ensure_datetime(systemStartLRTime)
+    end_time_raw = _ensure_datetime(systemEndTime)
+    if init_time_raw.tzinfo is not None:
+        init_time_raw = init_time_raw.replace(tzinfo=None)
+    if end_time_raw.tzinfo is not None:
+        end_time_raw = end_time_raw.replace(tzinfo=None)
 
-    if end_time < init_time:
+    if end_time_raw < init_time_raw:
         raise ValueError("systemEndTime must be >= systemStartLRTime")
 
-    total_hours = int(round((end_time - init_time).total_seconds() / 3600.0))
-    fxx_all = _gfs_forecast_hours(total_hours)
-    # Skip analysis hour (f000) for rate-based data
-    fxx_list = fxx_all
+    # Start from the specified cycle (if forced) or the most recent cycle at or before init_time_raw
+    attempt = 0
+    outputs_overall: List[str] = []
+    cycle_start = _align_to_gfs_cycle(force_cycle_start or init_time_raw)
 
-    outputs: List[str] = []
-
-    for fxx in fxx_list:
-        valid_time = init_time + timedelta(hours=fxx)
-
-        # retrieve PRATE via Herbie for this forecast hour
-        H = Herbie(init_time, model="gfs", product="pgrb2.0p25", fxx=fxx)
-
-        ds: Optional[Union[xr.Dataset, List[xr.Dataset]]] = None
-        last_err: Optional[Exception] = None
-        for query in (":PRATE:surface", ":PRATE:", "PRATE:surface", "PRATE"):
+    while attempt <= max_cycles_back:
+        # Clear any partial outputs before a new attempt (optional)
+        if clear_between_attempts:
             try:
-                ds = H.xarray(query)
-                break
-            except Exception as e:  # pragma: no cover - remote data nuances
-                last_err = e
-                ds = None
-        if ds is None:
-            # If PRATE is missing for this hour, we skip
-            sys.stderr.write(
-                f"Warning: Could not retrieve PRATE for f{fxx:03d} ({valid_time:%Y-%m-%d %H:%M} UTC).\n"
-            )
-            if last_err:
-                sys.stderr.write(f"  Reason: {last_err}\n")
-            continue
+                if os.path.isdir(qpf_store_path):
+                    for name in os.listdir(qpf_store_path):
+                        if name.startswith("gfs.") and name.endswith(".tif"):
+                            try:
+                                os.remove(os.path.join(qpf_store_path, name))
+                            except Exception:
+                                pass
+            except Exception:
+                pass
 
-        # Herbie/cfgrib may return a list of datasets (multiple hypercubes).
-        # Per user request, use the first hypercube (cube 0).
-        try:
-            if isinstance(ds, list):
-                if len(ds) == 0:
-                    raise KeyError("Empty hypercube list returned for PRATE")
-                ds0 = ds[0]
-                ds = ds0
-                if "prate" in ds.data_vars:
-                    var_name = "prate"
-                elif "PRATE" in ds.data_vars:
-                    var_name = "PRATE"
+        init_time = cycle_start
+        end_time = end_time_raw
+
+        total_hours = int(round((end_time - init_time).total_seconds() / 3600.0))
+        if total_hours < 0:
+            # If going too far back, break early
+            break
+        fxx_list = _gfs_forecast_hours(total_hours)
+
+        outputs: List[str] = []
+        failures = 0
+
+        for fxx in fxx_list:
+            valid_time = init_time + timedelta(hours=fxx)
+
+            # retrieve PRATE via Herbie for this forecast hour
+            H = Herbie(init_time, model="gfs", product="pgrb2.0p25", fxx=fxx)
+
+            ds: Optional[Union[xr.Dataset, List[xr.Dataset]]] = None
+            last_err: Optional[Exception] = None
+            for query in (":PRATE:surface", ":PRATE:", "PRATE:surface", "PRATE"):
+                try:
+                    ds = H.xarray(query)
+                    break
+                except Exception as e:  # pragma: no cover - remote data nuances
+                    last_err = e
+                    ds = None
+            if ds is None:
+                # If PRATE is missing for this hour, skip
+                sys.stderr.write(
+                    f"Warning: Could not retrieve PRATE for f{fxx:03d} (valid {valid_time:%Y-%m-%d %H:%M} UTC) from cycle {init_time:%Y-%m-%d %H}.\n"
+                )
+                if last_err:
+                    sys.stderr.write(f"  Reason: {last_err}\n")
+                failures += 1
+                continue
+
+            # Herbie/cfgrib may return a list of datasets (multiple hypercubes).
+            # Use the first hypercube when multiple are returned.
+            try:
+                if isinstance(ds, list):
+                    if len(ds) == 0:
+                        raise KeyError("Empty hypercube list returned for PRATE")
+                    ds0 = ds[0]
+                    ds = ds0
+                    if "prate" in ds.data_vars:
+                        var_name = "prate"
+                    elif "PRATE" in ds.data_vars:
+                        var_name = "PRATE"
+                    else:
+                        data_vars = list(ds.data_vars)
+                        if not data_vars:
+                            raise KeyError("PRATE variable not present in first hypercube")
+                        var_name = data_vars[0]
                 else:
-                    # Fall back: try to find a single data var
-                    data_vars = list(ds.data_vars)
-                    if not data_vars:
-                        raise KeyError("PRATE variable not present in first hypercube")
-                    var_name = data_vars[0]
-            else:
-                if "prate" in ds.data_vars:
-                    var_name = "prate"
-                elif "PRATE" in ds.data_vars:
-                    var_name = "PRATE"
-                else:
-                    raise KeyError("PRATE variable not present in dataset")
+                    if "prate" in ds.data_vars:
+                        var_name = "prate"
+                    elif "PRATE" in ds.data_vars:
+                        var_name = "PRATE"
+                    else:
+                        raise KeyError("PRATE variable not present in dataset")
 
-            prate_da = ds[var_name]
-        except Exception as e:  # pragma: no cover
-            sys.stderr.write(
-                f"Warning: PRATE variable not found for f{fxx:03d}. Reason: {e}\n"
+                prate_da = ds[var_name]
+            except Exception as e:  # pragma: no cover
+                sys.stderr.write(
+                    f"Warning: PRATE variable not found for f{fxx:03d}. Reason: {e}\n"
+                )
+                failures += 1
+                continue
+
+            # Standardize spatial dims and CRS
+            prate_da = _standardize_latlon(prate_da)
+            prate_da = _wrap_longitudes_to_180(prate_da)
+
+            # Convert rate (kg m-2 s-1 == mm/s) to mm/hour
+            rate = prate_da.data.astype(np.float32)
+            if rate.ndim == 3:
+                rate = np.squeeze(rate, axis=0)
+            rate_mm_per_hour = rate * 3600.0
+
+            # Build DataArray with mm/hour precipitation rate
+            step_da = xr.DataArray(
+                data=rate_mm_per_hour,
+                dims=("lat", "lon"),
+                coords={"lat": prate_da.coords["lat"], "lon": prate_da.coords["lon"]},
+                name="PRATE_mm_per_hour",
+                attrs={"units": "mm/hour"},
             )
-            continue
 
-        # Standardize spatial dims and CRS
-        prate_da = _standardize_latlon(prate_da)
-        prate_da = _wrap_longitudes_to_180(prate_da)
+            # Attach spatial metadata for rioxarray
+            step_da = step_da.rio.write_crs("EPSG:4326", inplace=False)
+            step_da = step_da.rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=False)
 
-        # Convert rate (kg m-2 s-1 == mm/s) to mm/hour
-        rate = prate_da.data.astype(np.float32)
-        if rate.ndim == 3:
-            rate = np.squeeze(rate, axis=0)
-        # Convert mm/s to mm/hour (multiply by 3600)
-        rate_mm_per_hour = rate * 3600.0
+            # Clip to bounding box
+            try:
+                clipped_da = step_da.rio.clip_box(
+                    minx=float(xmin), miny=float(ymin), maxx=float(xmax), maxy=float(ymax)
+                )
+            except Exception:
+                # If clip fails (e.g., bbox outside domain), fall back to un-clipped writing
+                clipped_da = step_da
 
-        # Build DataArray with mm/hour precipitation rate
-        step_da = xr.DataArray(
-            data=rate_mm_per_hour,
-            dims=("lat", "lon"),
-            coords={"lat": prate_da.coords["lat"], "lon": prate_da.coords["lon"]},
-            name="PRATE_mm_per_hour",
-            attrs={"units": "mm/hour"},
+            # Build output path and write
+            out_name = f"gfs.{valid_time:%Y%m%d%H%M}.tif"
+            out_path = os.path.join(qpf_store_path, out_name)
+            os.makedirs(qpf_store_path, exist_ok=True)
+            _safe_to_raster(clipped_da, out_path)
+            outputs.append(out_path)
+
+        # Success criteria: at least one file successfully written for this cycle
+        if len(outputs) > 0:
+            outputs_overall = outputs
+            break
+
+        # If all hours failed (Herbie couldn't find any), optionally try previous cycle
+        if not allow_previous_cycle_fallback:
+            break
+
+        prev_cycle = cycle_start - timedelta(hours=6)
+        sys.stderr.write(
+            f"No GFS data written for cycle {cycle_start:%Y-%m-%d %H}. Trying previous cycle {prev_cycle:%Y-%m-%d %H}...\n"
         )
+        cycle_start = prev_cycle
+        attempt += 1
 
-        # Attach spatial metadata for rioxarray
-        step_da = step_da.rio.write_crs("EPSG:4326", inplace=False)
-        step_da = step_da.rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=False)
-
-        # Clip to bounding box
-        try:
-            clipped_da = step_da.rio.clip_box(minx=float(xmin), miny=float(ymin), maxx=float(xmax), maxy=float(ymax))
-        except Exception:
-            # If clip fails (e.g., bbox outside domain), fall back to un-clipped writing
-            clipped_da = step_da
-
-        # Build output path and write
-        out_name = f"gfs.{valid_time:%Y%m%d%H%M}.tif"
-        out_path = os.path.join(qpf_store_path, out_name)
-        os.makedirs(qpf_store_path, exist_ok=True)
-        _safe_to_raster(clipped_da, out_path)
-        outputs.append(out_path)
-
-    return outputs
+    return outputs_overall
 
 
 def _parse_cli_args(argv: Optional[List[str]] = None):  # pragma: no cover - CLI helper
     import argparse
 
-    p = argparse.ArgumentParser(description="Download GFS APCP via Herbie and write step GeoTIFFs.")
-    p.add_argument("--start", required=True, help="Model run start (e.g., '2023-09-04 12')")
-    p.add_argument("--end", required=True, help="End valid time (e.g., '2023-09-09 00')")
-    p.add_argument("--xmin", type=float, required=True)
-    p.add_argument("--xmax", type=float, required=True)
-    p.add_argument("--ymin", type=float, required=True)
-    p.add_argument("--ymax", type=float, required=True)
-    p.add_argument("--out", required=True, help="Output directory for GeoTIFFs")
+    p = argparse.ArgumentParser(description="Download GFS PRATE via Herbie and write hourly GeoTIFFs.")
+    # When provided, run once for the given window
+    p.add_argument("--start", help="Model run start (e.g., '2023-09-04 12')")
+    p.add_argument("--end", help="End valid time (e.g., '2023-09-09 00')")
+    p.add_argument("--xmin", type=float)
+    p.add_argument("--xmax", type=float)
+    p.add_argument("--ymin", type=float)
+    p.add_argument("--ymax", type=float)
+    p.add_argument("--out", help="Output directory for GeoTIFFs")
+
+    # Auto mode options
+    p.add_argument("--auto-out", help="Auto mode output directory (default: AUTO_OUT_DIR in script)")
+    p.add_argument("--auto-hours", type=int, help="Forecast horizon hours for auto mode (default: 120)")
+    p.add_argument("--poll-seconds", type=int, help="Polling interval seconds for auto mode (default: 300)")
+    p.add_argument(
+        "--auto-once",
+        action="store_true",
+        help="Run auto mode for a single pass (no polling loop)",
+    )
     return p.parse_args(argv)
 
 
-if __name__ == "__main__":  # pragma: no cover -CLI ready
+def _latest_cycle_now() -> datetime:
+    """Return the latest GFS cycle time (UTC) as of now."""
+    return _align_to_gfs_cycle(datetime.utcnow())
+
+
+def _auto_mode(
+    out_dir: Optional[str] = None,
+    hours: Optional[int] = None,
+    poll_seconds: Optional[int] = None,
+    one_shot: bool = False,
+) -> None:
+    """Continuously download the latest GFS cycle as it becomes available.
+
+    - Does not fall back to previous cycles; it waits/polls for the latest cycle.
+    - Uses hardcoded defaults unless overridden via CLI.
+    """
+    out_dir = out_dir or AUTO_OUT_DIR
+    hours = hours or AUTO_HOURS
+    poll = poll_seconds or AUTO_POLL_SECONDS
+    xmin, xmax, ymin, ymax = AUTO_BBOX
+
+    os.makedirs(out_dir, exist_ok=True)
+    last_cycle: Optional[datetime] = None
+
+    while True:
+        try:
+            now_utc = datetime.utcnow()
+            latest = _latest_cycle_now()
+            # choose target cycle using grace window
+            if now_utc < latest + timedelta(minutes=AUTO_CYCLE_GRACE_MINUTES):
+                target_cycle = latest - timedelta(hours=6)
+                sys.stderr.write(
+                    f"Auto mode: within {AUTO_CYCLE_GRACE_MINUTES} min of latest cycle {latest:%Y-%m-%d %H}; targeting previous cycle {target_cycle:%Y-%m-%d %H}.\n"
+                )
+            else:
+                target_cycle = latest
+
+            start = target_cycle
+            end = target_cycle + timedelta(hours=hours)
+
+            if last_cycle is None or target_cycle != last_cycle:
+                # New cycle detected. Stage the first successful files before clearing the main folder.
+                staging_dir = os.path.join(out_dir, ".staging")
+                try:
+                    if os.path.isdir(staging_dir):
+                        for name in os.listdir(staging_dir):
+                            try:
+                                os.remove(os.path.join(staging_dir, name))
+                            except Exception:
+                                pass
+                    else:
+                        os.makedirs(staging_dir, exist_ok=True)
+                except Exception:
+                    pass
+
+                sys.stderr.write(
+                    f"Auto mode: switching to target cycle {target_cycle:%Y-%m-%d %H} (latest {latest:%Y-%m-%d %H}). Staging into {staging_dir} before clearing {out_dir}.\n"
+                )
+
+                staged = download_GFS(
+                    systemStartLRTime=start,
+                    systemEndTime=end,
+                    xmin=xmin,
+                    xmax=xmax,
+                    ymin=ymin,
+                    ymax=ymax,
+                    qpf_store_path=staging_dir,
+                    max_cycles_back=0,
+                    force_cycle_start=target_cycle,
+                    allow_previous_cycle_fallback=False,
+                    clear_between_attempts=False,
+                )
+
+                if len(staged) > 0:
+                    # Clear previous cycle files in out_dir and move staged files in
+                    try:
+                        if os.path.isdir(out_dir):
+                            for name in os.listdir(out_dir):
+                                if name.startswith("gfs.") and name.endswith(".tif"):
+                                    try:
+                                        os.remove(os.path.join(out_dir, name))
+                                    except Exception:
+                                        pass
+                        # Move all staged files to out_dir
+                        for name in os.listdir(staging_dir):
+                            src = os.path.join(staging_dir, name)
+                            dst = os.path.join(out_dir, name)
+                            try:
+                                shutil.move(src, dst)
+                            except Exception:
+                                pass
+                        # Attempt to remove staging dir if empty
+                        try:
+                            os.rmdir(staging_dir)
+                        except Exception:
+                            pass
+                        last_cycle = target_cycle
+                        sys.stderr.write(
+                            f"Auto mode: staged {len(staged)} files. Cleared {out_dir} and promoted staged files for cycle {target_cycle:%Y-%m-%d %H}.\n"
+                        )
+                    except Exception as e:
+                        sys.stderr.write(f"Auto mode: error promoting staged files: {e}\n")
+                else:
+                    # No data yet for the new cycle; do not clear out_dir. Try again next poll.
+                    sys.stderr.write(
+                        f"Auto mode: no files available yet for cycle {target_cycle:%Y-%m-%d %H}. Will retry later without clearing {out_dir}.\n"
+                    )
+            else:
+                # Same cycle: top-up directly in out_dir
+                sys.stderr.write(
+                    f"Auto mode: attempting cycle {target_cycle:%Y-%m-%d %H} UTC to +{hours}h into {out_dir}\n"
+                )
+                written = download_GFS(
+                    systemStartLRTime=start,
+                    systemEndTime=end,
+                    xmin=xmin,
+                    xmax=xmax,
+                    ymin=ymin,
+                    ymax=ymax,
+                    qpf_store_path=out_dir,
+                    max_cycles_back=0,  # not used when fallback disabled
+                    force_cycle_start=target_cycle,
+                    allow_previous_cycle_fallback=False,
+                    clear_between_attempts=False,
+                )
+                sys.stderr.write(
+                    f"Auto mode: wrote {len(written)} files for cycle {target_cycle:%Y-%m-%d %H}.\n"
+                )
+        except Exception as e:
+            sys.stderr.write(f"Auto mode error: {e}\n")
+
+        # Exit immediately in one-shot mode; otherwise sleep and continue polling
+        if one_shot:
+            break
+        try:
+            import time
+            time.sleep(poll)
+        except KeyboardInterrupt:
+            sys.stderr.write("Auto mode stopped by user.\n")
+            break
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry
     args = _parse_cli_args()
-    written = download_GFS(
-        systemStartLRTime=args.start,
-        systemEndTime=args.end,
-        xmin=args.xmin,
-        xmax=args.xmax,
-        ymin=args.ymin,
-        ymax=args.ymax,
-        qpf_store_path=args.out,
-    )
-    print(f"Wrote {len(written)} files to {args.out}")
+    # If both start and end are provided, run once in parameterized mode; otherwise, run auto mode
+    if args.start and args.end and args.xmin is not None and args.xmax is not None and args.ymin is not None and args.ymax is not None and args.out:
+        written = download_GFS(
+            systemStartLRTime=args.start,
+            systemEndTime=args.end,
+            xmin=args.xmin,
+            xmax=args.xmax,
+            ymin=args.ymin,
+            ymax=args.ymax,
+            qpf_store_path=args.out,
+        )
+        print(f"Wrote {len(written)} files to {args.out}")
+    else:
+        _auto_mode(
+            out_dir=args.auto_out,
+            hours=args.auto_hours,
+            poll_seconds=args.poll_seconds,
+            one_shot=getattr(args, "auto_once", False),
+        )
