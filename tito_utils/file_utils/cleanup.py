@@ -1,6 +1,6 @@
 import os            
 import shutil        
-from datetime import timedelta  
+from datetime import timedelta, timezone  
 from tito_utils.file_utils.datetime_utils import get_geotiff_datetime
 
 def cleanup_precip(current_datetime, precipFolder, qpf_store_path):
@@ -12,10 +12,23 @@ def cleanup_precip(current_datetime, precipFolder, qpf_store_path):
         precipFolder {str} -- path to the geotiff precipitation folder
         qpf_store_path {str} -- path to the folder where QPF files are stored
     """
+    # Normalize timezone handling: compare naive UTC datetimes to avoid
+    # "can't compare offset-naive and offset-aware datetimes" errors.
+    def _to_naive_utc(dt):
+        try:
+            if getattr(dt, "tzinfo", None) is not None:
+                return dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return dt
+        except Exception:
+            # If anything unexpected, fall back to original value
+            return dt
+
+    current_naive_utc = _to_naive_utc(current_datetime)
+
     qpes = []
     qpfs = []
-    older_QPE = current_datetime - timedelta(hours=9.5)
-    imerg_Latency = current_datetime - timedelta(hours=4)
+    older_QPE = current_naive_utc - timedelta(hours=9.5)
+    imerg_Latency = current_naive_utc - timedelta(hours=4)
     
     try:
         # List all precip files
@@ -37,12 +50,12 @@ def cleanup_precip(current_datetime, precipFolder, qpf_store_path):
             except Exception as e:
                 print(f"Error processing QPE file {qpe}: {e}")
 
-        print("    Deleting all QPF files older than Current Time: ", current_datetime)
-        print("    Copying all QPF files older than Current Time: ", current_datetime, " into qpf_store folder.")
+        print("    Deleting all QPF files older than Current Time: ", current_naive_utc)
+        print("    Copying all QPF files older than Current Time: ", current_naive_utc, " into qpf_store folder.")
         for qpf in qpfs:
             try:
                 geotiff_datetime = get_geotiff_datetime(precipFolder + qpf)
-                if geotiff_datetime < current_datetime:
+                if geotiff_datetime < current_naive_utc:
                     shutil.copy2(precipFolder + qpf, qpf_store_path)
                 os.remove(precipFolder + qpf)
             except Exception as e:
@@ -52,7 +65,7 @@ def cleanup_precip(current_datetime, precipFolder, qpf_store_path):
         for qpedup in qpes:
             try:
                 geotiff_datetime = get_geotiff_datetime(precipFolder + qpedup)
-                if geotiff_datetime > current_datetime - timedelta(hours=4):
+                if geotiff_datetime > current_naive_utc - timedelta(hours=4):
                     os.remove(precipFolder + qpedup)
             except Exception as e:
                 print(f"Error processing QPE duplicate file {qpedup}: {e}")
@@ -60,7 +73,7 @@ def cleanup_precip(current_datetime, precipFolder, qpf_store_path):
         print(f"    Deleting all QPF files in store folder older than: {imerg_Latency}")
         qpf_stored_files = os.listdir(qpf_store_path)
         qpf_stored_files = [f for f in qpf_stored_files if f.endswith('.tif')]
-        max_qpf = current_datetime - timedelta(hours=4)
+        max_qpf = current_naive_utc - timedelta(hours=4)
         for qpf_stored in qpf_stored_files:
             try:
                 qpf_datetime = get_geotiff_datetime(qpf_store_path + qpf_stored)
