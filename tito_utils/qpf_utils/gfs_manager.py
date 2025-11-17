@@ -1,6 +1,5 @@
 import os
 import shutil
-from datetime import datetime as dt
 from datetime import timedelta
 from .gfs_downloader import download_GFS
 import glob
@@ -60,10 +59,37 @@ def GFS_searcher(path_gfs, qpf_store_path, start_time, end_time, xmin, xmax, ymi
     else:
         print(f"⚠️ Missing {len(missing_files)} files. Triggering download...")
 
-    # Adjust start_time to previous GFS cycle (00,06,12,18)
+        # Adjust start_time to previous GFS cycle (00,06,12,18)
         new_start = start_time.replace(minute=0, second=0, microsecond=0)
         while new_start.hour % 6 != 0:
             new_start -= timedelta(hours=1)
+
+        # Ensure the chosen cycle is actually released (GFS has ~3-4h latency).
+        # If current UTC is within the release delay window for this cycle, fall back one cycle (6h) repeatedly until ready.
+        from datetime import datetime as _dt
+        release_delay_hours = 4  # conservative default
+        _now_utc = _dt.utcnow()
+
+        # Normalize tz: if new_start is timezone-aware, compare using naive UTC
+        try:
+            _candidate = new_start.replace(tzinfo=None)
+        except Exception:
+            _candidate = new_start
+
+        while _now_utc < (_candidate + timedelta(hours=release_delay_hours)):
+            print(
+                "GFS manager: Selected cycle",
+                _candidate.strftime("%Y-%m-%d %H:00"),
+                f"UTC is not yet available (<{release_delay_hours}h since cycle). Current UTC is",
+                _now_utc.strftime("%Y-%m-%d %H:%M"),
+                "— falling back 6h to previous cycle.",
+            )
+            _candidate = _candidate - timedelta(hours=6)
+
+        # Use the ready cycle as new_start
+        new_start = _candidate
+        print("GFS manager: Using cycle start", new_start.strftime("%Y-%m-%d %H:00"), "UTC for download.")
+
         # Call downloader
         download_GFS(new_start, end_time, xmin, xmax, ymin, ymax, download_folder)
         
