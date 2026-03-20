@@ -5,7 +5,7 @@ TITO is a framework designed to run the EF5 hydrologic model operationally, inte
 ## Installation Instructions
 **1. Clone the repository**
   ```sh
-  git clone https://github.com/AHWALab/TITO.git
+  git clone https://github.com/AHWALab/TITOWA_1km.git
   ```
 **2. Navigate to the repository folder**
   ```sh
@@ -48,7 +48,7 @@ Users must populate the required folders with topographic and parameter grids fo
 
 ## How to run?
 **1. Edit the config file:**
-After completing the installation of the required environment and populating the corresponding EF5 folders, open `westafrica_1km_config.py` file. There are few lines users need to change in this config file to run TITO successfully:
+After completing the installation of the required environment and populating the corresponding EF5 folders, open `westafrica1km_config.py` file. There are few lines users need to change in this config file to run TITO successfully:
 - **ef5Path:** Update this path to the corresponding ef5's binary path in your system.
 - **HindCastMode:** If you are running an event happened in the PAST, set `HindCastMode = True` and write the date of interest in `HindCastDate`, use the format "YYYY-MM-DD HH:MM". If you want to run it in Nowcast Mode (meaning TITO will start running in the present time) set `HindCastMode = False`
 - **run_LR:** To include QPF in the simulation (options are GFS or WRF), set `run_L = True`.  
@@ -73,7 +73,7 @@ If you intend to apply TITO to a different region, we recommend selecting an are
   ```
 
 ## Contact
-Please contact Vanessa Robledo at vanessa-robledodelgado@uiowa.edu or the [AHWA Laboratory](https://ahwa.lab.uiowa.edu/) Development team at engr-ahwa-lab@uiowa.edu.
+Please contact Naman Mehta at naman-mehta@uiowa.edu or Vanessa Robledo at vanessa-robledodelgado@uiowa.edu or the [AHWA Laboratory](https://ahwa.lab.uiowa.edu/) Development team at engr-ahwa-lab@uiowa.edu.
 
 ## Cite this package
 Robledo Delgado, V., & Vergara, H. (2025). Threading Inputs to Outputs (TITO) (v2.0.0). Zenodo. https://doi.org/10.5281/zenodo.17246491
