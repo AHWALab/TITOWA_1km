@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large binary ML/model files
+*.h5
+*.hdf5
+*.pth
+*.npy
+*.nc
+*.nc4
+*.grb
+*.grib
+*.grib2
+
+# Temporary files
+*.tmp
+*.log
+temp/
