@@ -50,8 +50,11 @@ def main(args):
     #set true of False to fill 4h imerg latency and create +2h hours (nowcast)
     NOWCAST = True 
     
-    # Read the configuration file User should change this line if the configuration file has a different name
-    import westafrica1km_config as config_file
+    # Read the configuration file from command line argument
+    # Usage: python orchestrator.py <configuration_file.py>
+    import importlib
+    config_module_name = os.path.splitext(os.path.basename(args[1]))[0] if len(args) > 1 else 'westafrica1km_config'
+    config_file = importlib.import_module(config_module_name)
     print(">>> Config file loaded")
 
     #Configuration file
