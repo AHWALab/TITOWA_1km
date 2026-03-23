@@ -1,39 +1,50 @@
-# Threading Inputs to Outputs (TITO): 
+# Threading Inputs to Outputs (TITO):
 
 TITO is a framework designed to run the EF5 hydrologic model operationally, integrating satellite data, machine learning techniques and NWP products to support real-time forecasting and hydrologic analysis.
 
 ## Installation Instructions
+
 **1. Clone the repository**
-  ```sh
-  git clone https://github.com/AHWALab/TITOWA_1km.git
-  ```
+
+```sh
+git clone https://github.com/AHWALab/TITOWA_1km.git
+```
+
 **2. Navigate to the repository folder**
-  ```sh
-  cd TITO/
-  ```
+
+```sh
+cd TITO/
+```
+
 **3. Run the set up code**
-   This step might take few minutes. 
-  ```sh
-  bash setup_tito.sh
-  ```
+This step might take few minutes.
+
+```sh
+bash setup_tito.sh
+```
+
 **4. Add the new conda env to your routines**
-  Open `pipeline.sh` and change the path to the conda environment, should be something like this:
-  ```
-  source /Users/$username$/miniconda3/etc/profile.d/conda.sh
-  ```
+Open `pipeline.sh` and change the path to the conda environment, should be something like this:
+
+```
+source /Users/$username$/miniconda3/etc/profile.d/conda.sh
+```
+
 After installation, ensure that your TITO folder contains the following subdirectories and files.
 
 ## Repository structure
 
-This repository is desiged to run EF5 operational over West Africa. 
+This repository is desiged to run EF5 operational over West Africa.
 Users must populate the required folders with topographic and parameter grids for their region of interest, and modify the EF5 control file (`templates/ef5_control_template.txt`) accordingly. A guide step-by-step to create the needed layers can be found in: [EF5-builder-toolkit](https://github.com/AHWALab/EF5-builder-toolkit).
 
 ### Key Files & Folders
+
 - **`westafrica1km_config.py`** – Configuration file to set up your operational run.
 - **`orchestrator.py`** – Main Python script that manages the entire workflow.
 - **`pipeline.sh`** – Bash script that activates the `tito_env` Conda environment and executes `orchestrator.py` using settings from `westafrica1km_config.py`.
 
 ### Input / Output Directories
+
 - **`basic/`** – Contains DEM, FAC, and FDIR files.
 - **`pet/`** – Contains monthly PET (Potential Evapotranspiration) grids.
 - **`parameters/`** – Contains distributed parameters for the KW and CREST models.
@@ -47,34 +58,43 @@ Users must populate the required folders with topographic and parameter grids fo
 - **`tito_utils/`** – Collection of utility modules and helper scripts used internally by TITO.
 
 ## How to run?
+
 **1. Edit the config file:**
 After completing the installation of the required environment and populating the corresponding EF5 folders, open `westafrica1km_config.py` file. There are few lines users need to change in this config file to run TITO successfully:
+
 - **ef5Path:** Update this path to the corresponding ef5's binary path in your system.
 - **HindCastMode:** If you are running an event happened in the PAST, set `HindCastMode = True` and write the date of interest in `HindCastDate`, use the format "YYYY-MM-DD HH:MM". If you want to run it in Nowcast Mode (meaning TITO will start running in the present time) set `HindCastMode = False`
-- **run_LR:** To include QPF in the simulation (options are GFS or WRF), set `run_L = True`.  
-  - If the simulation is for a **past event** (`HindCastMode = True`), you must provide:  
-    - QPF start date (`StartLRtime`)  
-    - QPF end date (`EndLRtime`)  
-    - QPF time step (`LR_timestep`) in minutes, e.g., `30u`  
-    - Path to your QPF archive (`QPF_archive_path`)  
+- **run_LR:** To include QPF in the simulation (options are GFS or WRF), set `run_L = True`.
+  - If the simulation is for a **past event** (`HindCastMode = True`), you must provide:
+    - QPF start date (`StartLRtime`)
+    - QPF end date (`EndLRtime`)
+    - QPF time step (`LR_timestep`) in minutes, e.g., `30u`
+    - Path to your QPF archive (`QPF_archive_path`)
   - If you are activating this option for **real-time operations**, TITO uses a predefined QPF time. You can check `orchestrator.py` to customize it for your convenience.
 - **email_gpm:** This version of TITO uses IMERG Early V07 as QPE, you will need to create and account in GPM server to download precipitation files, please visit [NASA GPM registration web page](https://registration.pps.eosdis.nasa.gov/registration/) and follow the instruction provided in the webpage. **Important:** use your registration email as password so TITO can use it in the routines.
+- **qpe_source:** Select the QPE source to ingest. Supported values are `"IMERG"` and `"HSAF"`.
+  - `IMERG` keeps the existing IMERG + ML nowcast behavior when `run_LR = False`.
+  - `HSAF` disables ML nowcast and ingests H40B files, filling the latest latency window by duplicating the most recent available HSAF file.
+- **hsaf_ftp_user / hsaf_ftp_pass:** Required only when `qpe_source = "HSAF"`. Downloading HSAF products from their official FTP server requires an account (user name and password). Register at [HSAF](https://hsaf.meteoam.it/User/Login) and provide your FTP credentials.
+- **hsaf_latency_minutes:** Minutes to treat as near-real-time latency when using HSAF (default `20`).
 
 **What if I want to use TITO in other regions?**
 
 If you plan to run TITO outside the default West Africa domain, there are a few important considerations. The machine learning routines were designed and trained using IMERG V07 data (0.1° resolution) over the West Africa region (xmin = −21.4, xmax = 30.4; ymin = −2.9, ymax = 33.1), corresponding to a grid size of **518 × 360 pixels**.
 
-If you intend to apply TITO to a different region, we recommend selecting an area with the same spatial dimensions (518 × 360 pixels) to ensure compatibility with the input structure. 
+If you intend to apply TITO to a different region, we recommend selecting an area with the same spatial dimensions (518 × 360 pixels) to ensure compatibility with the input structure.
 
 **2. Run TITO:**
-  Run the following line in your terminal:
-  ```sh
-  ./pipeline.sh
-  ```
+Run the following line in your terminal:
+
+```sh
+./pipeline.sh
+```
 
 ## Contact
+
 Please contact Naman Mehta at naman-mehta@uiowa.edu or Vanessa Robledo at vanessa-robledodelgado@uiowa.edu or the [AHWA Laboratory](https://ahwa.lab.uiowa.edu/) Development team at engr-ahwa-lab@uiowa.edu.
 
 ## Cite this package
-Robledo Delgado, V., & Vergara, H. (2025). Threading Inputs to Outputs (TITO) (v2.0.0). Zenodo. https://doi.org/10.5281/zenodo.17246491
 
+Robledo Delgado, V., & Vergara, H. (2025). Threading Inputs to Outputs (TITO) (v2.0.0). Zenodo. https://doi.org/10.5281/zenodo.17246491
